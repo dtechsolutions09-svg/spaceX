@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Starlink AR — satélites en la cámara</title>
+<script src="https://unpkg.com/satellite.js@5.0.0/dist/satellite.min.js"></script>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#000;color:#fff;font:14px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;overflow:hidden;touch-action:none}
+video,canvas{position:fixed;inset:0;width:100vw;height:100vh;object-fit:cover}
+#hud{position:fixed;top:0;left:0;right:0;padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;background:linear-gradient(#000c,#0000);display:flex;justify-content:space-between;gap:8px;pointer-events:none;font-size:13px}
+#hud b{font-size:17px}
+#bar{position:fixed;bottom:0;left:0;right:0;padding:8px 10px calc(env(safe-area-inset-bottom) + 10px);background:linear-gradient(#0000,#000d);display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+button{background:#ffffff1f;color:#fff;border:1px solid #ffffff40;border-radius:20px;padding:9px 14px;font-size:14px;backdrop-filter:blur(6px)}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;background:#05080d;z-index:10}
+#start h1{margin:0;font-size:24px}
+#start p{color:#9aa4b2;max-width:420px;margin:0}
+#start button{font-size:18px;padding:14px 28px;background:#2f81f7;border:none}
+#panel{position:fixed;left:10px;right:10px;bottom:80px;background:#0d1117ee;border:1px solid #30363d;border-radius:14px;padding:12px 14px;display:none;max-height:60vh;overflow:auto;z-index:5}
+#panel label{display:block;margin:10px 0 2px;color:#9aa4b2;font-size:12px}
+#panel label span{float:right;color:#fff;font-weight:600}
+#panel input[type=range]{width:100%}
+#info{position:fixed;left:10px;right:10px;bottom:80px;background:#0d1117ee;border:1px solid #30363d;border-radius:14px;padding:12px 14px;display:none;z-index:4}
+#info h3{margin:0 0 4px;font-size:16px}
+.mut{color:#9aa4b2;font-size:12px}
+#warn{position:fixed;top:70px;left:10px;right:10px;background:#f8514933;border:1px solid #f85149;border-radius:10px;padding:8px 10px;display:none;font-size:13px;z-index:3}
+</style>
+</head>
+<body>
+<video id="cam" playsinline autoplay muted></video>
+<canvas id="cv"></canvas>
+
+<div id="hud">
+  <div><b id="hDir">–</b><br><span id="hEl">–</span></div>
+  <div style="text-align:right"><span id="hCount">–</span><br><span id="hTle" class="mut"></span></div>
+</div>
+<div id="warn"></div>
+
+<div id="bar">
+  <button id="bTle">⬇ TLE</button>
+  <button id="bCfg">⚙ Ajustes</button>
+  <button id="bFile">📂</button>
+  <input type="file" id="fTle" accept=".txt,.tle" style="display:none">
+</div>
+
+<div id="panel">
+  <b>Ajustes</b> <span class="mut">— compara el horizonte dibujado con el real y corrige</span>
+  <label>Declinación magnética <span id="vDec"></span></label>
+  <input id="dec" type="range" min="-20" max="20" step="0.5" value="-7.5">
+  <div class="mut">Bogotá ≈ −7.5° (aprox.). Verifica tu valor en la calculadora de declinación de NOAA.</div>
+  <label>Corrección manual del rumbo <span id="vOff"></span></label>
+  <input id="off" type="range" min="-45" max="45" step="0.5" value="0">
+  <label>Campo de visión vertical de la cámara <span id="vFov"></span></label>
+  <input id="fov" type="range" min="35" max="90" step="1" value="62">
+  <label>Elevación mínima Starlink <span id="vMin"></span></label>
+  <input id="minEl" type="range" min="0" max="40" step="1" value="25">
+  <label>Suavizado de sensores <span id="vSm"></span></label>
+  <input id="sm" type="range" min="0" max="0.95" step="0.05" value="0.8">
+  <div style="margin-top:10px"><button id="bClose">Cerrar</button></div>
+</div>
+
+<div id="info"></div>
+
+<div id="start">
+  <h1>🛰️ Starlink AR</h1>
+  <p>Apunta el celular al cielo y verás dónde está cada satélite Starlink, aunque no se vea a simple vista.</p>
+  <p class="mut">Se necesita permiso de cámara, ubicación y sensores de movimiento. Antes de empezar, calibra la brújula moviendo el teléfono en forma de 8.</p>
+  <button id="go">Empezar</button>
+  <p class="mut" id="startErr"></p>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const D2R=Math.PI/180,R2D=180/Math.PI;
+const DIRS=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSO','SO','OSO','O','ONO','NO','NNO'];
+const dirS=az=>DIRS[Math.round(((az%360)+360)%360/22.5)%16];
+const cv=$('cv'),cx=cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){DPR=Math.min(2,window.devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cx.setTransform(DPR,0,0,DPR,0,0);}
+addEventListener('resize',resize);resize();
+
+/* ---------- ajustes persistentes ---------- */
+const CFG=['dec','off','fov','minEl','sm'];
+try{const c=JSON.parse(localStorage.getItem('slAR')||'{}');CFG.forEach(k=>{if(c[k]!=null)$(k).value=c[k];});}catch(e){}
+function cfgTxt(){$('vDec').textContent=$('dec').value+'°';$('vOff').textContent=$('off').value+'°';$('vFov').textContent=$('fov').value+'°';$('vMin').textContent=$('minEl').value+'°';$('vSm').textContent=$('sm').value;
+  try{localStorage.setItem('slAR',JSON.stringify(Object.fromEntries(CFG.map(k=>[k,$(k).value]))));}catch(e){}}
+CFG.forEach(k=>$(k).oninput=cfgTxt);cfgTxt();
+$('bCfg').onclick=()=>{$('info').style.display='none';$('panel').style.display=$('panel').style.display==='block'?'none':'block';};
+$('bClose').onclick=()=>$('panel').style.display='none';
+
+/* ---------- ubicación ---------- */
+let pos=null;
+function startGeo(){
+  if(!navigator.geolocation){warn('Este navegador no da ubicación.');return;}
+  navigator.geolocation.watchPosition(p=>{pos={lat:p.coords.latitude,lon:p.coords.longitude,h:(p.coords.altitude||0)/1000};},
+    e=>warn('Sin ubicación: '+e.message),{enableHighAccuracy:true,maximumAge:10000});
+}
+
+/* ---------- TLE ---------- */
+let sats=[];
+function parseTle(t){const L=t.split(/\r?\n/).map(s=>s.trimEnd()).filter(Boolean),o=[];
+  for(let i=0;i<L.length;i++)if(L[i].startsWith('1 ')&&L[i+1]?.startsWith('2 ')){const n=(i>0&&!L[i-1].startsWith('2 '))?L[i-1].trim():'NORAD '+L[i].slice(2,7);try{o.push({name:n,satrec:satellite.twoline2satrec(L[i],L[i+1])})}catch(e){}i++;}
+  return o;}
+function setTle(t,src){sats=parseTle(t);$('hTle').textContent=`${sats.length} sats · ${src}`;try{localStorage.setItem('slTle',t);localStorage.setItem('slTleT',Date.now());}catch(e){}compute();}
+async function dlTle(){
+  $('hTle').textContent='descargando TLE…';
+  try{const r=await fetch('https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle');if(!r.ok)throw new Error('HTTP '+r.status);setTle(await r.text(),'CelesTrak');}
+  catch(e){warn('No se pudieron descargar los TLE ('+e.message+'). Usa 📂 para cargar un archivo.');$('hTle').textContent='sin TLE';}
+}
+$('bTle').onclick=dlTle;$('bFile').onclick=()=>$('fTle').click();
+$('fTle').onchange=e=>{const f=e.target.files[0];if(f)f.text().then(t=>setTle(t,f.name));};
+function loadCachedTle(){
+  try{const t=localStorage.getItem('slTle'),ts=+localStorage.getItem('slTleT')||0;
+    if(t){sats=parseTle(t);const h=(Date.now()-ts)/36e5;$('hTle').textContent=`${sats.length} sats · caché ${h<1?'<1':h.toFixed(0)} h`;if(h>12)dlTle();return;}}catch(e){}
+  dlTle();
+}
+
+/* ---------- sol (baja precisión) ---------- */
+function sunEci(d){
+  const n=(d.getTime()/864e5+2440587.5)-2451545,L=(280.46+0.9856474*n)*D2R,g=(357.528+0.9856003*n)*D2R;
+  const lam=L+(1.915*Math.sin(g)+0.02*Math.sin(2*g))*D2R,eps=(23.439-4e-7*n)*D2R,AU=1.496e8;
+  return {x:AU*Math.cos(lam),y:AU*Math.cos(eps)*Math.sin(lam),z:AU*Math.sin(eps)*Math.sin(lam)};
+}
+function sunlit(p,s){ // sombra cilíndrica de la Tierra
+  const sl=Math.hypot(s.x,s.y,s.z),u={x:s.x/sl,y:s.y/sl,z:s.z/sl},d=p.x*u.x+p.y*u.y+p.z*u.z;
+  if(d>0)return true;const px=p.x-d*u.x,py=p.y-d*u.y,pz=p.z-d*u.z;return Math.hypot(px,py,pz)>6371;
+}
+
+/* ---------- cálculo de satélites (1 vez por segundo) ---------- */
+let pts=[],geo=[],sunEl=null,lastGeoKey='';
+const enu=(az,el)=>{const a=az*D2R,e=el*D2R;return[Math.cos(e)*Math.sin(a),Math.cos(e)*Math.cos(a),Math.sin(e)];};
+function compute(){
+  if(!pos||!sats.length){pts=[];return;}
+  const o={latitude:pos.lat*D2R,longitude:pos.lon*D2R,height:pos.h},t=new Date(),gm=satellite.gstime(t),t2=new Date(t.getTime()+20000),gm2=satellite.gstime(t2);
+  const s=sunEci(t),sl=satellite.ecfToLookAngles(o,satellite.eciToEcf(s,gm));sunEl=sl.elevation*R2D;
+  const key=pos.lat.toFixed(2)+','+pos.lon.toFixed(2);
+  if(key!==lastGeoKey){lastGeoKey=key;geo=[];for(let L=-180;L<=180;L+=1){const R=42164,la=satellite.ecfToLookAngles(o,{x:R*Math.cos(L*D2R),y:R*Math.sin(L*D2R),z:0});if(la.elevation>0)geo.push(enu(la.azimuth*R2D,la.elevation*R2D));}}
+  const out=[];
+  for(const st of sats){
+    const pv=satellite.propagate(st.satrec,t);if(!pv||!pv.position)continue;
+    const la=satellite.ecfToLookAngles(o,satellite.eciToEcf(pv.position,gm));const el=la.elevation*R2D;if(el<-2)continue;
+    const az=la.azimuth*R2D;const p={name:st.name,az,el,rng:la.rangeSat,v:enu(az,el)};
+    const pv2=satellite.propagate(st.satrec,t2);if(pv2&&pv2.position){const l2=satellite.ecfToLookAngles(o,satellite.eciToEcf(pv2.position,gm2));p.v2=enu(l2.azimuth*R2D,l2.elevation*R2D);}
+    p.lit=sunlit(pv.position,s);p.naked=p.lit&&sunEl<-6&&el>10;
+    out.push(p);
+  }
+  pts=out;
+  const minEl=+$('minEl').value;
+  $('hCount').innerHTML=`<b>${out.filter(p=>p.el>=minEl).length}</b> sobre ${minEl}° · ${out.filter(p=>p.el>0).length} sobre horizonte<br>${out.filter(p=>p.naked).length} posibles a simple vista`;
+}
+
+/* ---------- orientación ---------- */
+let M=null; // columnas: ejes del dispositivo en ENU [[xE,xN,xU],[yE..],[zE..]]
+let gotAbs=false,lastOri=0;
+function rotMat(al,be,ga){
+  const a=al*D2R,b=be*D2R,g=ga*D2R,cA=Math.cos(a),sA=Math.sin(a),cB=Math.cos(b),sB=Math.sin(b),cG=Math.cos(g),sG=Math.sin(g);
+  return [[cA*cG-sA*sB*sG, cG*sA+cA*sB*sG, -cB*sG],
+          [-cB*sA,         cA*cB,          sB],
+          [cA*sG+cG*sA*sB, sA*sG-cA*cG*sB, cB*cG]];
+}
+function onOri(e,isAbs){
+  if(e.alpha==null)return;
+  let alpha;
+  if(e.webkitCompassHeading!=null)alpha=360-e.webkitCompassHeading;  // iOS
+  else if(isAbs||e.absolute)alpha=e.alpha;                          // Android absoluto
+  else{if(gotAbs)return;alpha=e.alpha;warn('El sensor no da rumbo absoluto: usa "Corrección manual del rumbo" en Ajustes.');}
+  if(isAbs)gotAbs=true;
+  alpha=alpha-(+$('dec').value)-(+$('off').value); // rumbo verdadero = magnético + declinación
+  const R=rotMat(alpha,e.beta,e.gamma),k=+$('sm').value;
+  if(!M)M=R;else M=M.map((col,i)=>{const c=col.map((v,j)=>v*k+R[i][j]*(1-k));const l=Math.hypot(...c);return c.map(v=>v/l);});
+  lastOri=performance.now();
+}
+async function startSensors(){
+  if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){
+    let r='denied';try{r=await DeviceOrientationEvent.requestPermission();}catch(e){}
+    if(r!=='granted')setTimeout(()=>warn('Permiso de sensores de movimiento no concedido: actívalo en los ajustes del navegador.'),500);
+  }
+  addEventListener('deviceorientationabsolute',e=>onOri(e,true),true);
+  addEventListener('deviceorientation',e=>onOri(e,false),true);
+}
+
+/* ---------- cámara ---------- */
+async function startCam(){
+  try{const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});$('cam').srcObject=s;}
+  catch(e){warn('Sin cámara ('+e.message+'). Se muestra el cielo sobre fondo negro.');}
+}
+
+/* ---------- proyección ---------- */
+function screenAngle(){return ((screen.orientation&&screen.orientation.angle)||window.orientation||0)*D2R;}
+function project(v){
+  // coords del dispositivo
+  const dx=v[0]*M[0][0]+v[1]*M[0][1]+v[2]*M[0][2], dy=v[0]*M[1][0]+v[1]*M[1][1]+v[2]*M[1][2], dz=v[0]*M[2][0]+v[1]*M[2][1]+v[2]*M[2][2];
+  const depth=-dz;if(depth<=0.02)return null;
+  const th=screenAngle(),sx=dx*Math.cos(th)-dy*Math.sin(th),sy=dx*Math.sin(th)+dy*Math.cos(th);
+  const f=(H/2)/Math.tan(+$('fov').value*D2R/2);
+  return [W/2+f*sx/depth, H/2-f*sy/depth];
+}
+function camDir(){ // a dónde apunta el centro de la pantalla
+  const v=[-M[2][0],-M[2][1],-M[2][2]];let az=Math.atan2(v[0],v[1])*R2D;if(az<0)az+=360;return[az,Math.asin(Math.max(-1,Math.min(1,v[2])))*R2D];
+}
+
+/* ---------- dibujo ---------- */
+let hits=[];
+function polyline(vs,style,width,dash){
+  cx.strokeStyle=style;cx.lineWidth=width;cx.setLineDash(dash||[]);cx.beginPath();let pen=false,prev=null;
+  for(const v of vs){const p=project(v);if(!p||(prev&&Math.hypot(p[0]-prev[0],p[1]-prev[1])>W)){pen=false;prev=null;continue;}pen?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1]);pen=true;prev=p;}
+  cx.stroke();cx.setLineDash([]);
+}
+function draw(){
+  cx.clearRect(0,0,W,H);hits=[];
+  if(!M){cx.fillStyle='#fff';cx.font='16px system-ui';cx.textAlign='center';cx.fillText('Esperando sensores de orientación…',W/2,H/2);requestAnimationFrame(draw);return;}
+  const minEl=+$('minEl').value;
+  // horizonte
+  const hz=[];for(let a=0;a<=360;a+=2)hz.push(enu(a,0));polyline(hz,'#3fb950cc',2);
+  const me=[];for(let a=0;a<=360;a+=2)me.push(enu(a,minEl));polyline(me,'#d29922aa',1.5,[8,6]);
+  // marcas de rumbo
+  cx.font='bold 15px system-ui';cx.textAlign='center';
+  for(let a=0;a<360;a+=15){const p=project(enu(a,0));if(!p)continue;const big=a%45===0;
+    cx.strokeStyle='#3fb950';cx.lineWidth=2;cx.beginPath();cx.moveTo(p[0],p[1]);cx.lineTo(p[0],p[1]-(big?14:7));cx.stroke();
+    if(big){cx.fillStyle=a===0?'#ff6b6b':'#fff';cx.fillText(a%90===0?DIRS[a/22.5]:DIRS[a/22.5]+' '+a+'°',p[0],p[1]-20);}}
+  // cénit
+  const zp=project([0,0,1]);if(zp){cx.fillStyle='#fff8';cx.font='12px system-ui';cx.fillText('cénit',zp[0],zp[1]-8);cx.beginPath();cx.arc(zp[0],zp[1],3,0,2*Math.PI);cx.fill();}
+  // arco GEO
+  if(geo.length){polyline(geo,'#f85149',2.5,[10,6]);const mid=geo[Math.floor(geo.length/2)],p=project(mid);if(p){cx.fillStyle='#ff7b72';cx.font='12px system-ui';cx.fillText('arco geoestacionario',p[0],p[1]-10);}}
+  // satélites
+  for(const s of pts){
+    const p=project(s.v);if(!p||p[0]<-40||p[0]>W+40||p[1]<-40||p[1]>H+40)continue;
+    const use=s.el>=minEl,col=s.el<0?'#666':s.naked?'#ffd33d':use?'#3fb950':'#d29922';
+    if(s.v2){const q=project(s.v2);if(q){const dx=q[0]-p[0],dy=q[1]-p[1],l=Math.hypot(dx,dy);if(l>2&&l<W){cx.strokeStyle=col+'99';cx.lineWidth=1.5;cx.beginPath();cx.moveTo(p[0],p[1]);cx.lineTo(q[0],q[1]);cx.stroke();
+      const ux=dx/l,uy=dy/l;cx.fillStyle=col+'99';cx.beginPath();cx.moveTo(q[0],q[1]);cx.lineTo(q[0]-7*ux+4*uy,q[1]-7*uy-4*ux);cx.lineTo(q[0]-7*ux-4*uy,q[1]-7*uy+4*ux);cx.fill();}}}
+    cx.fillStyle=col;cx.beginPath();cx.arc(p[0],p[1],s.naked?6:use?5:3.5,0,2*Math.PI);cx.fill();
+    if(s.naked){cx.strokeStyle='#ffd33d';cx.lineWidth=1.5;cx.beginPath();cx.arc(p[0],p[1],11,0,2*Math.PI);cx.stroke();}
+    if(use||s.naked){cx.fillStyle='#fff';cx.font='12px system-ui';cx.textAlign='left';cx.fillText(s.name.replace('STARLINK-','SL-'),p[0]+9,p[1]-6);
+      cx.fillStyle='#ffffffaa';cx.font='11px system-ui';cx.fillText(Math.round(s.el)+'° · '+Math.round(s.rng)+' km',p[0]+9,p[1]+8);}
+    hits.push({x:p[0],y:p[1],s});
+  }
+  // mira central
+  cx.strokeStyle='#ffffffcc';cx.lineWidth=1.5;cx.beginPath();cx.arc(W/2,H/2,18,0,2*Math.PI);cx.moveTo(W/2-28,H/2);cx.lineTo(W/2-10,H/2);cx.moveTo(W/2+10,H/2);cx.lineTo(W/2+28,H/2);cx.moveTo(W/2,H/2-28);cx.lineTo(W/2,H/2-10);cx.moveTo(W/2,H/2+10);cx.lineTo(W/2,H/2+28);cx.stroke();
+  const [az,el]=camDir();
+  $('hDir').textContent=`${dirS(az)} ${Math.round(az)}°`;
+  $('hEl').textContent=`elevación ${Math.round(el)}°`+(sunEl!=null?` · sol ${Math.round(sunEl)}°`:'')+(pos?'':' · sin GPS');
+  if(performance.now()-lastOri>3000){cx.fillStyle='#f85149';cx.textAlign='center';cx.font='14px system-ui';cx.fillText('Sensores sin datos',W/2,H/2+50);}
+  requestAnimationFrame(draw);
+}
+
+/* ---------- toque en un satélite ---------- */
+cv.addEventListener('click',e=>{
+  $('panel').style.display='none';
+  let best=null,bd=40;for(const h of hits){const d=Math.hypot(h.x-e.clientX,h.y-e.clientY);if(d<bd){bd=d;best=h.s;}}
+  const box=$('info');
+  if(!best){box.style.display='none';return;}
+  const minEl=+$('minEl').value;
+  box.innerHTML=`<h3>🛰️ ${best.name}</h3>
+   Dirección <b>${dirS(best.az)} ${best.az.toFixed(0)}°</b> · elevación <b>${best.el.toFixed(0)}°</b> · distancia <b>${best.rng.toFixed(0)} km</b><br>
+   ${best.el>=minEl?'✅ Lo bastante alto para que una antena Starlink lo use.':'⬇️ Demasiado bajo para el servicio (< '+minEl+'°).'}<br>
+   ${best.naked?'⭐ Iluminado por el sol con cielo oscuro: <b>podría verse a simple vista</b>, aunque es débil.':best.lit?'☀️ Iluminado, pero el cielo aún está claro: no se ve a ojo.':'🌑 Está en la sombra de la Tierra: invisible a ojo.'}
+   <div class="mut" style="margin-top:6px">La flecha indica hacia dónde se moverá en los próximos 20 s.</div>`;
+  box.style.display='block';
+});
+
+/* ---------- inicio ---------- */
+let wt;function warn(m){const w=$('warn');w.textContent=m;w.style.display='block';clearTimeout(wt);wt=setTimeout(()=>w.style.display='none',7000);}
+$('go').onclick=async()=>{
+  $('startErr').textContent='';
+  if(!window.isSecureContext){$('startErr').textContent='Abre esta página por HTTPS: cámara y sensores no funcionan sin HTTPS.';return;}
+  try{await startSensors();}catch(e){$('startErr').textContent=e.message;return;}
+  $('start').style.display='none';
+  startCam();startGeo();loadCachedTle();
+  setInterval(compute,1000);requestAnimationFrame(draw);
+};
+</script>
+</body>
+</html>
